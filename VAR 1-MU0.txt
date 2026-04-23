@@ -1,0 +1,240 @@
+' Set working directory
+cd "C:\Users\crist\Documents\Cristiano\Uni\Magistrale\FBE\ASSIGNMENT 2"
+
+' load basic data
+wfopen macro_EYbull_Sept2025.wf1
+
+group group_input dlog(dpil) d(ishort) log(epuit) log(exch_m) log(ipcr) dlog(ipi) log(liq) dlog(pcomm) dlog(pilx) d(qdisi) dlog(shpr) dlog(xwtcpb)
+
+group_input.line(m)
+
+freeze(t_ur_test) group_input.uroot(ips, lagmethod=sic)
+t_ur_test.table
+
+
+'*************************************************************
+'**********CHOOSING HYPERPARAMETERS*********
+'*************************************************************
+
+%bvar_my_list = " dlog(dpil) d(ishort) log(epuit) log(exch_m) log(ipcr) dlog(ipi) log(liq) dlog(pcomm) dlog(pilx) d(qdisi) dlog(shpr) dlog(xwtcpb)  "
+
+
+group pippo {%bvar_my_list}
+pippo.uroot(ips, lagmethod=sic)
+
+var var_pippo
+var_pippo.ls 1 4 {%bvar_my_list}
+
+var_pippo.laglen(8)
+var_pippo.arroots(graph)
+
+
+
+' define the name of my Bayesian VAR Model
+var bvar_my 
+
+' Hyper-Parameter Descriptions
+'  L1 = Overall tightness hyper-parameter (0-1) [small, prior dominates sample]
+'  L2 = Relative cross-variable weight hyper-parameter (0-1) [0 = univariate]
+'  L3 = Lag decay hyper-parameter (>0) [1 or 2]
+
+' Hyper-parameter specification (i.e. define the grid to be searched)
+scalar L1_MIN = 0.1
+scalar L1_MAX = 0.6
+scalar L1_STEP = 0.1
+ 
+scalar L2_MIN = 0.5
+scalar L2_MAX = 1
+scalar L2_STEP = 0.5
+ 
+scalar L3_MIN = 0.5
+scalar L3_MAX = 3.5
+scalar L3_STEP = 0.5
+
+
+' Iteration counter
+scalar ITER = 1
+
+' Matrix to store the RMSE statistics static forecast (1s ahead)
+matrix(22356,5) MRMSE 
+
+' A nested for-loop to search the space of models
+for !l1=L1_MIN to L1_MAX step L1_STEP
+ for !l2=L2_MIN to L2_MAX step L2_STEP
+  for !L3=L3_MIN to L3_MAX step L3_STEP '''for 7 times?
+	smpl 1980q1 1999q4 '''arbitrary
+     bvar_my.bvar(prior=lit,L1=!l1,L2=!l2,L3=!l3,Mu1=0) 1 4 {%bvar_my_list} 
+	smpl 2000q1 2019q4
+     bvar_my.fit(f=na, fangraph, classical) f '''one step ahead? using all available info till the moment
+     scalar NEW_RMSE = @rmse(log(PILX),log(PILX_f))
+	delete *_f
+     if ITER=1 then
+        scalar OLD_RMSE = NEW_RMSE
+        copy bvar_my bvar_best
+     else
+        if NEW_RMSE < OLD_RMSE then
+           copy bvar_my bvar_best
+           scalar OLD_RMSE = NEW_RMSE
+        endif
+     endif
+     MRMSE(ITER,1) = !l1
+     MRMSE(ITER,2) = !l2
+     MRMSE(ITER,3) = !l3
+     MRMSE(ITER,4) = OLD_RMSE
+     MRMSE(ITER,5) = NEW_RMSE
+     scalar ITER = ITER + 1
+  next
+ next
+next
+
+
+smpl 1980q1 1999q4
+     var VAR_my.ls 1 4 {%bvar_my_list} 
+	smpl 2000q1 2019q4
+     var_my.fit(f=na) f
+     scalar var_RMSE = @rmse(log(PILX),log(PILX_f))
+	delete *_f
+
+
+smpl 1980q1 1999q4
+     var VAR_my_2.ls 1 1 {%bvar_my_list} 
+	smpl 2000q1 2019q4
+     var_my_2.fit(f=na) f
+     scalar var_RMSE_2 = @rmse(log(PILX),log(PILX_f))
+	delete *_f
+
+
+scalar best_RMSE = old_RMSE 
+delete new_RMSE old_RMSE *_max *_min *_step
+smpl @all
+
+'***************************************************************
+'************COMPARING MODELS***********************
+'***************************************************************
+
+%modlist =  " ar rw dd auto var var2 bvar "
+%bvar_my_list = " dlog(dpil) d(ishort) log(epuit) log(exch_m) log(ipcr) dlog(ipi) log(liq) dlog(pcomm) dlog(pilx) d(qdisi) dlog(shpr) dlog(xwtcpb)  "
+
+
+%lastquarter = " 2019q4  " ' last quarter used as end-of-sample 
+!lags  = 8              ' observations excluded at the beginning of the sample ''' to leqave  different initializations
+!train = 60             ' observations excluded at the end of the sample, i.e. the evaluation period
+
+for !i=0 to !train-4 ' i.e. !train-4steps ahead '''-4 because we have to do the 4 step forecast
+
+'	estimate over alternative end-samples, see {%lastquarter} 
+
+	smpl @first+!lags {%lastquarter}-!train+!i ' 
+ 
+	equation eq_ar.ls dlog(pilx) c dlog(pilx(-1)) 
+	equation eq_rw.ls dlog(pilx) c  
+	equation eq_dd.ls d(dlog(pilx)) c  
+     pilx.autoarma(select=sic, agraph, atable, etable, fgraph, eqname=eq_auto) temp c
+	delete temp
+
+	var eq_var.ls 1 1 {%bvar_my_list}
+	var eq_var2.ls 1 4 {%bvar_my_list}
+	var eq_bvar.bvar(mu1=0,lambda1=0.2,lambda2=1,lambda3=3.5) 1 4 {%bvar_my_list} ''''mix of literature l1 l2 and last exercise l3 min 24 circa
+
+'	nowcast loop (!train forecast rounds) 
+
+	smpl {%lastquarter}-!train+!i+1 {%lastquarter}-!train+!i+4 
+	eq_ar.forecast(f=na) temp
+'	loop for storing !s = 1, 2, 3 and 4 steps ahead forecasts (all in temp)
+	for !s=1 to 4 '  
+		smpl {%lastquarter}-!train+!i+!s {%lastquarter}-!train+!i+!s 
+		genr pilx_ar{!s} = temp
+	next
+	delete temp
+
+'''EQ_AR EQ_AUTO vedere cosa ha deciso di modellare auto
+
+	smpl {%lastquarter}-!train+!i+1 {%lastquarter}-!train+!i+4 
+	eq_rw.forecast(f=na) temp
+'	loop for storing !s = 1, 2, 3 and 4 steps ahead forecasts (all in temp)
+	for !s=1 to 4 '  
+		smpl {%lastquarter}-!train+!i+!s {%lastquarter}-!train+!i+!s 
+		genr pilx_rw{!s} = temp
+	next
+	delete temp
+
+	smpl {%lastquarter}-!train+!i+1 {%lastquarter}-!train+!i+4 
+	eq_dd.forecast(f=na) temp
+'	loop for storing !s = 1, 2, 3 and 4 steps ahead forecasts (all in temp)
+	for !s=1 to 4 '  
+		smpl {%lastquarter}-!train+!i+!s {%lastquarter}-!train+!i+!s 
+		genr pilx_dd{!s} = temp
+	next
+	delete temp
+
+	smpl {%lastquarter}-!train+!i+1 {%lastquarter}-!train+!i+4 
+	eq_auto.forecast(f=na) temp
+'	loop for storing !s = 1, 2, 3 and 4 steps ahead forecasts (all in temp)
+	for !s=1 to 4 '  
+		smpl {%lastquarter}-!train+!i+!s {%lastquarter}-!train+!i+!s 
+		genr pilx_auto{!s} = temp
+	next
+	delete temp
+
+	smpl {%lastquarter}-!train+!i+1 {%lastquarter}-!train+!i+4 
+	eq_var.forecast(f=na) f
+'	loop for storing !s = 1, 2, 3 and 4 steps ahead forecasts (all in temp)
+	for !s=1 to 4 '  
+		smpl {%lastquarter}-!train+!i+!s {%lastquarter}-!train+!i+!s 
+		genr pilx_var{!s} = pilx_f
+	next
+	delete *_f '''lui fa delete *_f
+
+smpl {%lastquarter}-!train+!i+1 {%lastquarter}-!train+!i+4 
+	eq_var2.forecast(f=na) f
+'	loop for storing !s = 1, 2, 3 and 4 steps ahead forecasts (all in temp)
+	for !s=1 to 4 '  
+		smpl {%lastquarter}-!train+!i+!s {%lastquarter}-!train+!i+!s 
+		genr pilx_var2{!s} = pilx_f
+	next
+	delete *_f '''lui fa delete *_f
+
+
+
+'''i cant use temp cause var will forecast all the variables that are in the VAR
+
+	smpl {%lastquarter}-!train+!i+1 {%lastquarter}-!train+!i+4 
+	eq_bvar.forecast(fangraph, classical) f
+'	loop for storing !s = 1, 2, 3 and 4 steps ahead forecasts (all in temp)
+	for !s=1 to 4   
+		smpl {%lastquarter}-!train+!i+!s {%lastquarter}-!train+!i+!s 
+		genr pilx_bvar{!s} = pilx_f
+	next
+	delete *_f
+
+next
+
+'  bias and RMSE
+
+' Matrix to store the bias and RMSE 
+
+matrix(8,7) OUTPUT '''one row for each orizon (of bias and rmse) and 6 models
+
+' sample overlapping all available forecasts
+smpl {%lastquarter}-!train+4 {%lastquarter}-3 
+
+!col = 1
+for %m {%modlist} 
+	for !s=1 to 4   
+		ls log(pilx)-log(pilx_{%m}{!s}) c
+		OUTPUT(!s,!col) = c(1)
+		scalar RMSE_{%m}{!s} = @rmse(log(pilx),log(pilx_{%m}{!s})) 
+		OUTPUT(!s+4,!col) = RMSE_{%m}{!s}
+	next
+	!col = !col+1
+next
+
+' mette le labels alle righecolonne di OUTPUT
+OUTPUT.setrowlabels bias1s bias2s bias3s bias4s rmse1s rmse2s rmse3s rmse4s
+OUTPUT.setcollabels {%modlist}
+
+show OUTPUT
+
+delete rmse_*''''lui aggiunge *
+
+
